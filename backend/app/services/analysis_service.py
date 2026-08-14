@@ -4,7 +4,7 @@ import asyncio
 import tiktoken
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.1-8b-instant"
@@ -394,7 +394,49 @@ def _normalize_task(task: dict, index: int) -> dict:
     }
 
 
-def normalize_action_plan_payload(payload: dict) -> dict:
+def _tokenize(text: str) -> set[str]:
+    return {t for t in re.findall(r"[a-zA-Z0-9]+", (text or "").lower()) if len(t) >= 2}
+
+
+def _resolve_team_name(raw_team: str, task_context: str, allowed_team_names: list[str]) -> str:
+    """Map model-provided team labels to workspace team names.
+    Falls back to first available workspace team to avoid generic labels.
+    """
+    if not allowed_team_names:
+        return (raw_team or "Unassigned").strip() or "Unassigned"
+
+    cleaned = (raw_team or "").strip()
+    if not cleaned:
+        return allowed_team_names[0]
+
+    allowed_lower = {name.lower(): name for name in allowed_team_names}
+    if cleaned.lower() in allowed_lower:
+        return allowed_lower[cleaned.lower()]
+
+    # Fuzzy token overlap between task/team context and workspace team names.
+    source_tokens = _tokenize(f"{cleaned} {task_context}")
+    best_name = allowed_team_names[0]
+    best_score = -1.0
+
+    for candidate in allowed_team_names:
+        cand_tokens = _tokenize(candidate)
+        if not cand_tokens:
+            continue
+        overlap = len(source_tokens & cand_tokens)
+        score = overlap / len(cand_tokens)
+
+        # small boost for substring containment
+        if cleaned.lower() in candidate.lower() or candidate.lower() in cleaned.lower():
+            score += 0.4
+
+        if score > best_score:
+            best_score = score
+            best_name = candidate
+
+    return best_name
+
+
+def normalize_action_plan_payload(payload: dict, workspace_teams: list[dict] | None = None) -> dict:
     """Normalize to strict, UI-ready schema."""
     if not isinstance(payload, dict):
         payload = {}
@@ -405,12 +447,45 @@ def normalize_action_plan_payload(payload: dict) -> dict:
 
     tasks = [_normalize_task(t, i + 1) for i, t in enumerate(raw_tasks)]
 
+    workspace_teams = workspace_teams or []
+    allowed_team_names = [str(t.get("name", "")).strip() for t in workspace_teams if str(t.get("name", "")).strip()]
+
+    if allowed_team_names:
+        for task in tasks:
+            context = f"{task.get('title', '')} {task.get('description', '')}"
+            task["team"] = _resolve_team_name(task.get("team", ""), context, allowed_team_names)
+
+    # Ensure timeline is always usable: estimate deadlines when missing.
+    base = datetime.utcnow().date()
+    for idx, task in enumerate(tasks):
+        if task.get("deadline"):
+            continue
+
+        priority = task.get("priority", "medium")
+        if priority == "high":
+            delta_days = 7 + (idx * 3)
+        elif priority == "medium":
+            delta_days = 14 + (idx * 4)
+        else:
+            delta_days = 21 + (idx * 5)
+
+        task["deadline"] = (base + timedelta(days=delta_days)).isoformat()
+
     teams = payload.get("teams", {})
     if not isinstance(teams, dict):
         teams = {}
 
+    # Build team map from workspace teams when available.
+    if workspace_teams:
+        team_map = {
+            str(t.get("name", "")).strip(): str(t.get("description", "")).strip() or f"Tasks owned by {str(t.get('name', '')).strip()}"
+            for t in workspace_teams
+            if str(t.get("name", "")).strip()
+        }
+    else:
+        team_map = {str(k): str(v) for k, v in teams.items()}
+
     # Ensure every referenced team exists in teams mapping.
-    team_map = {str(k): str(v) for k, v in teams.items()}
     for task in tasks:
         if task["team"] not in team_map:
             team_map[task["team"]] = f"Tasks owned by {task['team']}"
@@ -505,7 +580,12 @@ def build_action_plan_sections(content_json: dict, markdown: str) -> dict:
     }
 
 
-async def generate_lecture_action_plan(transcript: str, summary: str = "", highlights: str = "") -> tuple[str, dict]:
+async def generate_lecture_action_plan(
+    transcript: str,
+    summary: str = "",
+    highlights: str = "",
+    workspace_teams: list[dict] | None = None,
+) -> tuple[str, dict]:
     """
     Generate a lecture-level action plan with both markdown and strict JSON.
     Uses summary/highlights first for token efficiency and falls back to transcript context.
@@ -513,6 +593,13 @@ async def generate_lecture_action_plan(transcript: str, summary: str = "", highl
     system = """You are an expert PM assistant creating execution-ready action plans.
 Return valid JSON only, no prose outside JSON.
 """
+
+    workspace_teams = workspace_teams or []
+    team_lines = "\n".join([
+        f"- {str(t.get('name', '')).strip()}: {str(t.get('description', '')).strip() or 'No description'}"
+        for t in workspace_teams
+        if str(t.get("name", "")).strip()
+    ])
 
     user = f"""
 Generate an action plan from this lecture context.
@@ -527,6 +614,9 @@ HIGHLIGHTS:
 TRANSCRIPT CONTEXT:
 {transcript[:12000]}
 
+WORKSPACE TEAMS (must use these exact team names when assigning tasks):
+{team_lines or '- Unassigned: No workspace teams available'}
+
 Return strictly JSON with schema:
 {{
   "summary": "short strategic summary",
@@ -538,18 +628,25 @@ Return strictly JSON with schema:
       "team": "",
       "owner": "",
       "priority": "high|medium|low",
-      "deadline": "YYYY-MM-DD or empty",
+            "deadline": "YYYY-MM-DD",
       "status": "todo|in_progress|blocked|done",
       "dependencies": ["task_2"]
     }}
   ],
   "teams": {{ "Team Name": "what this team owns" }}
 }}
+
+Rules:
+- Provide at least 5 tasks.
+- Every task must include a realistic deadline in YYYY-MM-DD format.
+- Use dependencies where sequencing is needed.
+- If workspace teams are provided, assign every task to one of those exact team names only.
+- Do not invent generic teams like "Backend Team" unless it exactly exists in workspace teams.
 """
 
     raw = await safe_groq_call(system, user, max_tokens=3072)
     payload = _extract_json_payload(raw)
-    normalized = normalize_action_plan_payload(payload)
+    normalized = normalize_action_plan_payload(payload, workspace_teams=workspace_teams)
 
     sections = build_action_plan_sections(normalized, "")
     markdown = "\n\n".join([

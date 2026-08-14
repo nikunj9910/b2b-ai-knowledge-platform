@@ -477,17 +477,32 @@ async def suggest_teams_for_lecture(
         limit=5,
     )
 
-    # Owners can see all team suggestions. Admin/member only see teams they belong to.
-    if org_role in ["admin", "member"]:
+    # Owners/admins can evaluate all teams for manual override.
+    # Members only see teams they belong to.
+    if org_role == "member":
         allowed_team_ids = {
             g["id"]
             for g in (await GroupService.get_groups_for_user(org_id, current_user["user_id"]))
         }
         suggested_teams = [t for t in suggested_teams if t.get("id") in allowed_team_ids]
+
+    # Build explicit eligible team list for the selector UI.
+    if org_role in ["owner", "admin"]:
+        eligible_teams = await GroupService.get_groups_for_org(org_id)
+    else:
+        eligible_teams = await GroupService.get_groups_for_user(org_id, current_user["user_id"])
     
     return {
         "lecture_id": lecture_id,
         "suggested_teams": suggested_teams,
+        "eligible_teams": [
+            {
+                "id": t.get("id"),
+                "name": t.get("name"),
+                "description": t.get("description"),
+            }
+            for t in (eligible_teams or [])
+        ],
     }
 
 
@@ -524,10 +539,10 @@ async def update_lecture_team_shares(
             detail="Cannot share personal lectures to teams"
         )
     
-    # Check permissions (must be org owner)
+    # Check permissions (workspace owner/admin)
     org_role = await OrganizationService.get_role(org_id, user_id)
-    if org_role != "owner":
-        raise HTTPException(status_code=403, detail="Only workspace owner can manage lecture sharing")
+    if org_role not in ["owner", "admin"]:
+        raise HTTPException(status_code=403, detail="Only workspace owner or admin can manage lecture sharing")
     
     # Validate all teams belong to this org
     teams_result = supabase.table("groups") \

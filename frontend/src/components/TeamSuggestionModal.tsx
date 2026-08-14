@@ -70,7 +70,11 @@ export default function TeamSuggestionModal({
                 setSuggestedTeams(teams);
 
                 const suggestedIds = new Set(teams.map((t) => t.id));
-                const allTeams: Team[] = (Array.isArray(allTeamsRes.data) ? allTeamsRes.data : []).map((t: any) => ({
+                const backendEligible = Array.isArray(data.eligible_teams) ? data.eligible_teams : [];
+                const fallbackEligible = Array.isArray(allTeamsRes.data) ? allTeamsRes.data : [];
+                const eligibleSource = backendEligible.length > 0 ? backendEligible : fallbackEligible;
+
+                const allTeams: Team[] = eligibleSource.map((t: any) => ({
                     id: t.id,
                     name: t.name,
                     description: t.description,
@@ -123,6 +127,18 @@ export default function TeamSuggestionModal({
         }
     };
 
+    const allTeamIds = [...suggestedTeams, ...otherTeams].map((t) => t.id);
+    const allSelected = allTeamIds.length > 0 && allTeamIds.every((id) => selectedTeams.has(id));
+
+    const handleToggleSelectAll = () => {
+        if (allTeamIds.length === 0) return;
+        if (allSelected) {
+            setSelectedTeams(new Set());
+            return;
+        }
+        setSelectedTeams(new Set(allTeamIds));
+    };
+
     if (!isOpen) return null;
 
     return (
@@ -171,6 +187,16 @@ export default function TeamSuggestionModal({
                         </div>
                     ) : (
                         <>
+                            <div style={{ padding: "0 16px 12px" }}>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={handleToggleSelectAll}
+                                    style={{ width: "100%", justifyContent: "center" }}
+                                >
+                                    {allSelected ? "Unselect all teams" : "Select all teams"}
+                                </button>
+                            </div>
                             {suggestedTeams.length > 0 && (
                                 <div style={{ padding: "0 16px 8px", color: "var(--text-muted)", fontSize: "0.8rem", fontWeight: 600 }}>
                                     Suggested Teams
@@ -217,21 +243,21 @@ export default function TeamSuggestionModal({
                                             )}
                                         </div>
 
-                                        {team.score && (
+                                        {team.score !== undefined && (
                                             <div className="team-score">
                                                 <div className="score-bar">
                                                     <div
                                                         className="score-fill"
                                                         style={{
-                                                            width: `${Math.min(team.score, 100)}%`,
+                                                            width: `${Math.max(0, Math.min(team.score, 100))}%`,
                                                             background: `hsl(${Math.max(
                                                                 0,
-                                                                Math.min(120, (team.score / 100) * 120)
+                                                                Math.min(120, (Math.max(0, Math.min(team.score, 100)) / 100) * 120)
                                                             )}, 70%, 60%)`,
                                                         }}
                                                     />
                                                 </div>
-                                                <span className="score-text">{team.score}%</span>
+                                                <span className="score-text">{Math.max(0, Math.min(team.score, 100))}%</span>
                                             </div>
                                         )}
 

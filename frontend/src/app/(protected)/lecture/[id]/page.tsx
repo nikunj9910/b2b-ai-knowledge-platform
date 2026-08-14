@@ -277,6 +277,9 @@ export default function LectureDetailPage() {
 
     const [showTeamSuggestions, setShowTeamSuggestions] = useState(false);
     const [teamSharePromptOpened, setTeamSharePromptOpened] = useState(false);
+    const [shareAllLoading, setShareAllLoading] = useState(false);
+    const [shareAllError, setShareAllError] = useState("");
+    const [shareAllSuccess, setShareAllSuccess] = useState("");
 
     const [actionPlanSubTab, setActionPlanSubTab] = useState("tasks");
     const [actionPlanLoading, setActionPlanLoading] = useState<string | null>(null);
@@ -525,6 +528,46 @@ export default function LectureDetailPage() {
         finally { setExportLoading(null); }
     };
 
+    const handleShareAllTeams = async () => {
+        if (!lecture?.org_id) return;
+
+        setShareAllLoading(true);
+        setShareAllError("");
+        setShareAllSuccess("");
+
+        try {
+            const suggestedRes = await lecturesAPI.suggestTeams(lectureId);
+            const eligibleTeams = Array.isArray(suggestedRes.data?.eligible_teams)
+                ? suggestedRes.data.eligible_teams
+                : [];
+            const fallbackSuggested = Array.isArray(suggestedRes.data?.suggested_teams)
+                ? suggestedRes.data.suggested_teams
+                : [];
+
+            const sourceTeams = eligibleTeams.length > 0 ? eligibleTeams : fallbackSuggested;
+            const teamIds = Array.from(new Set(sourceTeams.map((t: any) => t.id).filter(Boolean)));
+
+            if (teamIds.length === 0) {
+                setShareAllError("No eligible teams found to share this item.");
+                return;
+            }
+
+            await lecturesAPI.shareTeams(lectureId, teamIds);
+            setShareAllSuccess(`Shared with ${teamIds.length} team(s).`);
+
+            if (typeof window !== "undefined") {
+                localStorage.setItem(teamPromptHandledKey, "1");
+            }
+
+            void fetchLecture();
+        } catch (err: unknown) {
+            const axErr = err as { response?: { data?: { detail?: string } } };
+            setShareAllError(axErr.response?.data?.detail || "Failed to share with all teams");
+        } finally {
+            setShareAllLoading(false);
+        }
+    };
+
     useEffect(() => {
         if (exportOpen) {
             const handleClick = () => setExportOpen(false);
@@ -569,12 +612,26 @@ export default function LectureDetailPage() {
                     {lecture.status === "completed" && (
                         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                             {lecture.org_id && (
-                                <button
-                                    className="btn btn-secondary btn-sm"
-                                    onClick={() => setShowTeamSuggestions(true)}
-                                >
-                                    <Users size={14} /> Share Teams
-                                </button>
+                                <>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => void handleShareAllTeams()}
+                                        disabled={shareAllLoading}
+                                    >
+                                        {shareAllLoading ? (
+                                            <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                                        ) : (
+                                            <Users size={14} />
+                                        )}
+                                        Share All Teams
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => setShowTeamSuggestions(true)}
+                                    >
+                                        <Users size={14} /> Share Teams
+                                    </button>
+                                </>
                             )}
                             <div className="export-dropdown" onClick={(e) => e.stopPropagation()}>
                                 <button className="btn btn-secondary btn-sm" onClick={() => setExportOpen(!exportOpen)}>
@@ -593,6 +650,18 @@ export default function LectureDetailPage() {
                     )}
                 </div>
             </div>
+
+            {shareAllError && (
+                <div className="alert alert-error" style={{ marginBottom: "16px" }}>
+                    {shareAllError}
+                </div>
+            )}
+
+            {shareAllSuccess && (
+                <div className="alert" style={{ marginBottom: "16px", background: "rgba(16,185,129,0.12)", color: "var(--accent-400)" }}>
+                    {shareAllSuccess}
+                </div>
+            )}
 
             {/* ── Processing ── */}
             {!["completed", "failed"].includes(lecture.status) && (
@@ -714,6 +783,19 @@ export default function LectureDetailPage() {
                                 {!actionPlanLoading && actionPlanSubTab === "tasks" && (() => {
                                     const tasks = (actionPlanSections.tasks?.content_json || []) as ActionTask[];
                                     const grouped: Record<string, ActionTask[]> = { high: [], medium: [], low: [] };
+                                    const priorityColors: Record<string, string> = {
+                                        high: "#ef4444",
+                                        medium: "#f59e0b",
+                                        low: "#22c55e",
+                                    };
+                                    const teamColor = (team: string) => {
+                                        const palette = ["#06b6d4", "#8b5cf6", "#22c55e", "#f59e0b", "#f97316", "#3b82f6"];
+                                        const text = (team || "unassigned").toLowerCase();
+                                        let hash = 0;
+                                        for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) % 997;
+                                        return palette[hash % palette.length];
+                                    };
+
                                     tasks.forEach((t) => {
                                         const key = (["high", "medium", "low"].includes(t.priority) ? t.priority : "medium") as "high" | "medium" | "low";
                                         grouped[key].push(t);
@@ -722,16 +804,23 @@ export default function LectureDetailPage() {
                                     return (
                                         <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "12px" }}>
                                             {(["high", "medium", "low"] as const).map((p) => (
-                                                <div key={p} style={{ border: "1px solid var(--border-subtle)", borderRadius: "10px", padding: "12px" }}>
+                                                <div key={p} style={{ border: `1px solid ${priorityColors[p]}55`, borderRadius: "10px", padding: "12px", background: `${priorityColors[p]}12` }}>
                                                     <h4 style={{ margin: "0 0 10px", textTransform: "capitalize" }}>{p} Priority ({grouped[p].length})</h4>
                                                     {grouped[p].length === 0 ? (
                                                         <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "0.85rem" }}>No tasks.</p>
                                                     ) : grouped[p].map((t) => (
-                                                        <div key={t.id} style={{ padding: "10px", borderRadius: "8px", background: "var(--bg-surface)", marginBottom: "8px" }}>
+                                                        <div key={t.id} style={{ padding: "10px", borderRadius: "8px", background: "var(--bg-surface)", marginBottom: "8px", borderLeft: `3px solid ${teamColor(t.team)}` }}>
+                                                            <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", marginBottom: "4px" }}>
+                                                                <span style={{ fontSize: "0.72rem", fontWeight: 700, color: teamColor(t.team), background: `${teamColor(t.team)}20`, border: `1px solid ${teamColor(t.team)}55`, borderRadius: "999px", padding: "2px 8px" }}>
+                                                                    TEAM: {t.team || "Unassigned"}
+                                                                </span>
+                                                                <span style={{ fontSize: "0.72rem", fontWeight: 700, color: priorityColors[p], background: `${priorityColors[p]}22`, border: `1px solid ${priorityColors[p]}55`, borderRadius: "999px", padding: "2px 8px" }}>
+                                                                    {t.priority.toUpperCase()}
+                                                                </span>
+                                                            </div>
                                                             <div style={{ fontWeight: 600 }}>{t.title}</div>
                                                             {t.description && <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginTop: "4px" }}>{t.description}</div>}
                                                             <div style={{ fontSize: "0.8rem", marginTop: "6px", color: "var(--text-muted)", display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                                                                <span>Team: {t.team || "Unassigned"}</span>
                                                                 <span>Owner: {t.owner || "TBD"}</span>
                                                                 {t.deadline && <span>Deadline: {t.deadline}</span>}
                                                                 <span>Status: {t.status}</span>
@@ -748,19 +837,177 @@ export default function LectureDetailPage() {
                                     const checkpoints = ([...(actionPlanSections.timeline?.content_json || [])] as ActionTask[])
                                         .sort((a, b) => (a.deadline || "9999-12-31").localeCompare(b.deadline || "9999-12-31"));
 
+                                    const teamColor = (team: string) => {
+                                        const palette = ["#06b6d4", "#8b5cf6", "#22c55e", "#f59e0b", "#f97316", "#3b82f6"];
+                                        const text = (team || "unassigned").toLowerCase();
+                                        let hash = 0;
+                                        for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) % 997;
+                                        return palette[hash % palette.length];
+                                    };
+
                                     if (!checkpoints.length) {
                                         return <div className="alert" style={{ background: "var(--bg-surface)", color: "var(--text-muted)" }}>No deadline tasks found. Add deadlines to create timeline checkpoints.</div>;
                                     }
 
+                                    const dates = checkpoints
+                                        .map((cp) => new Date(cp.deadline).getTime())
+                                        .filter((n) => Number.isFinite(n));
+                                    if (!dates.length) {
+                                        return <div className="alert" style={{ background: "var(--bg-surface)", color: "var(--text-muted)" }}>Timeline dates are not valid yet.</div>;
+                                    }
+                                    const minDate = Math.min(...dates);
+                                    const maxDate = Math.max(...dates);
+                                    const range = Math.max(1, maxDate - minDate);
+                                    const statusColor: Record<string, string> = {
+                                        todo: "#94a3b8",
+                                        in_progress: "#38bdf8",
+                                        blocked: "#f97316",
+                                        done: "#22c55e",
+                                    };
+                                    const fmt = (d: string) => {
+                                        const dt = new Date(d);
+                                        if (Number.isNaN(dt.getTime())) return d;
+                                        return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+                                    };
+                                    const monthTicks = (() => {
+                                        const ticks: Array<{ key: string; label: string; left: number }> = [];
+                                        const min = new Date(minDate);
+                                        const max = new Date(maxDate);
+                                        const cursor = new Date(min.getFullYear(), min.getMonth(), 1);
+
+                                        while (cursor.getTime() <= max.getTime()) {
+                                            const ts = cursor.getTime();
+                                            const left = Math.max(0, Math.min(100, ((ts - minDate) / range) * 100));
+                                            ticks.push({
+                                                key: `${cursor.getFullYear()}-${cursor.getMonth()}`,
+                                                label: cursor.toLocaleDateString("en-US", { month: "short", year: "2-digit" }),
+                                                left,
+                                            });
+                                            cursor.setMonth(cursor.getMonth() + 1);
+                                        }
+
+                                        if (!ticks.length) {
+                                            return [
+                                                { key: "start", label: min.toLocaleDateString("en-US", { month: "short", year: "2-digit" }), left: 0 },
+                                                { key: "end", label: max.toLocaleDateString("en-US", { month: "short", year: "2-digit" }), left: 100 },
+                                            ];
+                                        }
+
+                                        return ticks;
+                                    })();
+                                    const total = checkpoints.length;
+                                    const doneCount = checkpoints.filter((cp) => cp.status === "done").length;
+
                                     return (
-                                        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                                            {checkpoints.map((cp) => (
-                                                <div key={cp.id} style={{ borderLeft: "3px solid var(--primary-500)", padding: "10px 12px", background: "var(--bg-surface)", borderRadius: "8px" }}>
-                                                    <div style={{ fontSize: "0.8rem", color: "var(--primary-400)", marginBottom: "4px" }}>{cp.deadline}</div>
-                                                    <div style={{ fontWeight: 600 }}>{cp.title}</div>
-                                                    <div style={{ fontSize: "0.82rem", color: "var(--text-muted)", marginTop: "3px" }}>{cp.team} • {cp.status}</div>
+                                        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                                            <div
+                                                style={{
+                                                    border: "1px solid var(--border-subtle)",
+                                                    borderRadius: "12px",
+                                                    padding: "12px",
+                                                    background: "linear-gradient(180deg, rgba(56,189,248,0.08), rgba(15,23,42,0.2))",
+                                                    display: "flex",
+                                                    justifyContent: "space-between",
+                                                    gap: "10px",
+                                                    flexWrap: "wrap",
+                                                }}
+                                            >
+                                                <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-secondary)", fontSize: "0.82rem" }}>
+                                                    <Calendar size={14} />
+                                                    <strong>{fmt(checkpoints[0].deadline)}</strong>
+                                                    <span>to</span>
+                                                    <strong>{fmt(checkpoints[checkpoints.length - 1].deadline)}</strong>
                                                 </div>
-                                            ))}
+                                                <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                                                    <span style={{ fontSize: "0.78rem", color: "var(--text-muted)", padding: "4px 8px", borderRadius: "999px", border: "1px solid var(--border-subtle)" }}>Total: {total}</span>
+                                                    <span style={{ fontSize: "0.78rem", color: "#22c55e", background: "#22c55e1a", padding: "4px 8px", borderRadius: "999px", border: "1px solid #22c55e55" }}>Done: {doneCount}</span>
+                                                </div>
+                                            </div>
+
+                                            <div
+                                                style={{
+                                                    border: "1px solid var(--border-subtle)",
+                                                    borderRadius: "12px",
+                                                    padding: "14px 10px 12px",
+                                                    background: "linear-gradient(180deg, rgba(99,102,241,0.09), rgba(15,23,42,0.2))",
+                                                }}
+                                            >
+                                                <div style={{ position: "relative", height: "30px" }}>
+                                                    <div style={{ position: "absolute", left: 0, right: 0, top: "20px", height: "2px", borderRadius: "999px", background: "rgba(148,163,184,0.4)" }} />
+                                                    {monthTicks.map((tick) => (
+                                                        <div key={tick.key} style={{ position: "absolute", left: `${tick.left}%`, top: 0, transform: "translateX(-50%)" }}>
+                                                            <div style={{ fontSize: "0.68rem", color: "var(--text-muted)", marginBottom: "4px", whiteSpace: "nowrap" }}>{tick.label}</div>
+                                                            <div style={{ width: "2px", height: "10px", margin: "0 auto", background: "rgba(148,163,184,0.75)", borderRadius: "999px" }} />
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+
+                                            <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: "10px" }}>
+                                                <div style={{ position: "absolute", left: "16px", top: "8px", bottom: "8px", width: "2px", background: "linear-gradient(to bottom, rgba(56,189,248,0.65), rgba(99,102,241,0.3))" }} />
+                                                {checkpoints.map((cp) => {
+                                                    const cpTime = new Date(cp.deadline).getTime();
+                                                    const pct = Math.max(0, Math.min(100, ((cpTime - minDate) / range) * 100));
+                                                    const tColor = teamColor(cp.team);
+                                                    const sColor = statusColor[cp.status] || "#94a3b8";
+
+                                                    return (
+                                                        <div key={cp.id} style={{ position: "relative", marginLeft: "0", paddingLeft: "34px" }}>
+                                                            <div
+                                                                style={{
+                                                                    position: "absolute",
+                                                                    left: "10px",
+                                                                    top: "18px",
+                                                                    width: "12px",
+                                                                    height: "12px",
+                                                                    borderRadius: "999px",
+                                                                    background: tColor,
+                                                                    border: "2px solid #0f172a",
+                                                                    boxShadow: `0 0 0 4px ${tColor}33`,
+                                                                }}
+                                                            />
+
+                                                            <div
+                                                                style={{
+                                                                    border: `1px solid ${tColor}44`,
+                                                                    borderRadius: "12px",
+                                                                    padding: "12px",
+                                                                    background: "var(--bg-surface)",
+                                                                    boxShadow: "0 10px 24px rgba(0,0,0,0.18)",
+                                                                }}
+                                                            >
+                                                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap", marginBottom: "8px" }}>
+                                                                    <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{cp.title}</div>
+                                                                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                                                                        <span style={{ fontSize: "0.72rem", fontWeight: 700, color: tColor, background: `${tColor}1f`, border: `1px solid ${tColor}55`, borderRadius: "999px", padding: "2px 8px" }}>
+                                                                            {cp.team || "Unassigned"}
+                                                                        </span>
+                                                                        <span style={{ fontSize: "0.72rem", fontWeight: 700, color: sColor, background: `${sColor}1f`, border: `1px solid ${sColor}55`, borderRadius: "999px", padding: "2px 8px" }}>
+                                                                            {cp.status.replace("_", " ").toUpperCase()}
+                                                                        </span>
+                                                                    </div>
+                                                                </div>
+
+                                                                <div style={{ position: "relative", height: "12px", borderRadius: "999px", background: "rgba(255,255,255,0.06)", overflow: "hidden", marginBottom: "8px" }}>
+                                                                    <div
+                                                                        style={{
+                                                                            width: `${Math.max(4, pct)}%`,
+                                                                            height: "100%",
+                                                                            borderRadius: "999px",
+                                                                            background: `linear-gradient(90deg, ${tColor}55, ${tColor})`,
+                                                                        }}
+                                                                    />
+                                                                </div>
+
+                                                                <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap", fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                                                                    <span>Timeline Position: {Math.round(pct)}%</span>
+                                                                    <span>Deadline: {fmt(cp.deadline)}</span>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
                                         </div>
                                     );
                                 })()}

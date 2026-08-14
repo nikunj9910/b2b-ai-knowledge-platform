@@ -256,13 +256,41 @@ async def _ensure_action_plan(lecture_id: str, user_id: str, force_refresh: bool
     summary = lecture.get("summary_text") or _get_cached(lecture_id, "summary_detailed") or ""
     highlights = _get_cached(lecture_id, "highlights") or ""
 
-    markdown, content_json = await generate_lecture_action_plan(transcript, summary, highlights)
-    _save_action_plan(lecture_id, markdown, content_json)
+    workspace_teams = []
+    org_id = lecture.get("org_id")
+    if org_id:
+        try:
+            workspace_teams = await GroupService.get_groups_for_org(org_id)
+        except Exception:
+            workspace_teams = []
 
-    latest = _get_cached_action_plan(lecture_id)
-    if not latest:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to persist action plan")
-    return latest, False
+    markdown, content_json = await generate_lecture_action_plan(
+        transcript,
+        summary,
+        highlights,
+        workspace_teams=workspace_teams,
+    )
+
+    # Try cache persistence, but do not block response if DB schema/cache is stale.
+    try:
+        _save_action_plan(lecture_id, markdown, content_json)
+        latest = _get_cached_action_plan(lecture_id)
+        if latest:
+            return latest, False
+    except Exception:
+        pass
+
+    # Direct Groq output fallback (non-cached) so feature still works.
+    sections = build_action_plan_sections(content_json, markdown)
+    return {
+        "lecture_id": lecture_id,
+        "markdown_content": markdown,
+        "content_json": content_json,
+        "tasks_json": sections["tasks"]["content_json"],
+        "timeline_json": sections["timeline"]["content_json"],
+        "dependencies_json": sections["dependencies"]["content_json"],
+        "team_breakdown_json": sections["team_breakdown"]["content_json"],
+    }, False
 
 
 @router.post("/summary", response_model=AnalysisResponse)

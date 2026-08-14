@@ -94,7 +94,10 @@ class TeamSuggestionService:
                 if overlap_score >= 10:
                     reasons.append(f"Shared with {max(1, overlap_score // 10)} colleagues")
 
-            total_score = membership_score + content_score + overlap_score
+            total_score = max(0, min(100, membership_score + content_score + overlap_score))
+            membership_score = max(0, min(100, membership_score))
+            content_score = max(0, min(100, content_score))
+            overlap_score = max(0, min(100, overlap_score))
             
             scored_teams.append({
                 "id": team_id,
